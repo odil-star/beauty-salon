@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://alena-beauty.uz/sitemap.xml
