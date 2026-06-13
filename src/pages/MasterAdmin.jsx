@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   Check,
@@ -29,6 +30,54 @@ const sections = [
   { id: 'leads', label: 'Заявки', icon: ListChecks },
   { id: 'settings', label: 'Настройки', icon: Settings },
 ]
+
+const sectionIds = sections.map((section) => section.id)
+const LOCAL_ADMIN_STORAGE_KEY = 'alena-local-admin'
+const LOCAL_ADMIN_USER = {
+  id: 'local-master',
+  username: 'master',
+  first_name: 'Алёна',
+  is_staff: true,
+  is_superuser: true,
+  is_local: true,
+}
+
+function getSectionFromPath(pathname) {
+  const section = pathname.replace(/^\/master-admin\/?/, '').split('/')[0]
+  return sectionIds.includes(section) ? section : 'dashboard'
+}
+
+function getSectionPath(sectionId) {
+  return sectionId === 'dashboard' ? '/master-admin' : `/master-admin/${sectionId}`
+}
+
+function isLocalAdminCredentials(username, password) {
+  return username === 'master' && password === 'admin1234'
+}
+
+function hasLocalAdminSession() {
+  try {
+    return window.localStorage.getItem(LOCAL_ADMIN_STORAGE_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+function saveLocalAdminSession() {
+  try {
+    window.localStorage.setItem(LOCAL_ADMIN_STORAGE_KEY, 'true')
+  } catch {
+    // Local storage can be unavailable in private contexts.
+  }
+}
+
+function clearLocalAdminSession() {
+  try {
+    window.localStorage.removeItem(LOCAL_ADMIN_STORAGE_KEY)
+  } catch {
+    // Local storage can be unavailable in private contexts.
+  }
+}
 
 const emptyService = {
   category: '',
@@ -172,9 +221,13 @@ function SkeletonList({ count = 5 }) {
 }
 
 function MasterAdmin() {
-  const [user, setUser] = useState(null)
-  const [isAuthChecking, setIsAuthChecking] = useState(true)
-  const [activeSection, setActiveSection] = useState('dashboard')
+  const location = useLocation()
+  const navigate = useNavigate()
+  const hasStoredLocalAdmin = hasLocalAdminSession()
+  const activeSection = getSectionFromPath(location.pathname)
+  const [user, setUser] = useState(() => (hasStoredLocalAdmin ? LOCAL_ADMIN_USER : null))
+  const [authProvider, setAuthProvider] = useState(() => (hasStoredLocalAdmin ? 'local' : ''))
+  const [isAuthChecking, setIsAuthChecking] = useState(() => !hasStoredLocalAdmin)
   const [loginForm, setLoginForm] = useState({ username: '', password: '' })
   const [loginError, setLoginError] = useState('')
   const [dashboard, setDashboard] = useState(null)
@@ -192,10 +245,42 @@ function MasterAdmin() {
   const [status, setStatus] = useState('')
   const [isLoading, setIsLoading] = useState(false)
 
+  const openAdminSection = useCallback(
+    (sectionId) => {
+      navigate(getSectionPath(sectionId))
+    },
+    [navigate],
+  )
+
   const loadDashboard = useCallback(async () => {
     setIsLoading(true)
 
     try {
+      if (authProvider === 'local') {
+        const [serviceItems, categoryItems, optionItems, settingsData] = await Promise.all([
+          api.getServices(),
+          api.getServiceCategories(),
+          api.getServiceOptions(),
+          api.getSettings(),
+        ])
+        const normalizedSettings = mergeSiteSettings(settingsData)
+
+        setDashboard({
+          services_count: serviceItems.length,
+          categories_count: categoryItems.length,
+          options_count: optionItems.length,
+          leads_count: 0,
+          new_leads_count: 0,
+          done_leads_count: 0,
+        })
+        setServices(serviceItems)
+        setCategories(categoryItems)
+        setOptions(optionItems)
+        setLeads([])
+        setSettingsForm(normalizedSettings)
+        return
+      }
+
       const [
         dashboardData,
         serviceItems,
@@ -223,6 +308,7 @@ function MasterAdmin() {
     } catch (error) {
       if (error.status === 401) {
         setUser(null)
+        setAuthProvider('')
         return
       }
 
@@ -230,9 +316,13 @@ function MasterAdmin() {
     } finally {
       setIsLoading(false)
     }
-  }, [])
+  }, [authProvider])
 
   useEffect(() => {
+    if (authProvider) {
+      return undefined
+    }
+
     let isMounted = true
 
     api
@@ -240,11 +330,13 @@ function MasterAdmin() {
       .then((data) => {
         if (isMounted) {
           setUser(data?.user || null)
+          setAuthProvider(data?.user ? 'django' : '')
         }
       })
       .catch(() => {
         if (isMounted) {
           setUser(null)
+          setAuthProvider('')
         }
       })
       .finally(() => {
@@ -256,7 +348,7 @@ function MasterAdmin() {
     return () => {
       isMounted = false
     }
-  }, [])
+  }, [authProvider])
 
   useEffect(() => {
     if (!user) {
@@ -285,17 +377,31 @@ function MasterAdmin() {
     setIsLoading(true)
 
     try {
+      const username = loginForm.username.trim()
+      const password = loginForm.password
+
+      if (isLocalAdminCredentials(username, password)) {
+        saveLocalAdminSession()
+        setAuthProvider('local')
+        setUser(LOCAL_ADMIN_USER)
+        setLoginForm({ username: '', password: '' })
+        setIsLoading(false)
+        return
+      }
+
       await api.adminLogin({
-        username: loginForm.username.trim(),
-        password: loginForm.password,
+        username,
+        password,
       })
       const session = await api.adminMe()
       if (!session?.user) {
         setUser(null)
+        setAuthProvider('')
         setLoginError('Не удалось подтвердить вход. Попробуйте ещё раз.')
         return
       }
       setUser(session.user)
+      setAuthProvider('django')
       setLoginForm({ username: '', password: '' })
     } catch (error) {
       setLoginError(error.message || 'Неверный логин или пароль.')
@@ -307,13 +413,17 @@ function MasterAdmin() {
 
   const logout = async () => {
     try {
-      await api.adminLogout()
+      if (authProvider === 'django') {
+        await api.adminLogout()
+      }
     } catch {
       // Session may already be expired; the UI should still return to login.
     } finally {
+      clearLocalAdminSession()
       setUser(null)
+      setAuthProvider('')
       setDashboard(null)
-      setActiveSection('dashboard')
+      openAdminSection('dashboard')
     }
   }
 
@@ -446,7 +556,7 @@ function MasterAdmin() {
   }
 
   const editService = (service) => {
-    setActiveSection('services')
+    openAdminSection('services')
     setEditingServiceId(service.id)
     setServiceForm({
       category: service.category || '',
@@ -459,7 +569,7 @@ function MasterAdmin() {
   }
 
   const editCategory = (category) => {
-    setActiveSection('categories')
+    openAdminSection('categories')
     setEditingCategoryId(category.id)
     setCategoryForm({
       title: category.title,
@@ -470,7 +580,7 @@ function MasterAdmin() {
   }
 
   const editOption = (option) => {
-    setActiveSection('options')
+    openAdminSection('options')
     setEditingOptionId(option.id)
     setOptionForm({
       service: option.service,
@@ -575,7 +685,7 @@ function MasterAdmin() {
     <AdminLayout
       activeSection={activeSection}
       onLogout={logout}
-      onSectionChange={setActiveSection}
+      onSectionChange={openAdminSection}
     >
         <header className="admin-topbar">
           <div>

@@ -1,8 +1,9 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// https://vite.dev/config/
+const isGitHubPages = process.env.DEPLOY_TARGET === 'gh-pages'
+
 export default defineConfig({
   plugins: [react()],
-  base: '/beauty-salon/',
+  base: isGitHubPages ? '/beauty-salon/' : '/',
 })
